@@ -25,37 +25,43 @@ Last updated: 2024-08-15
 当前 legacy 代码库核心模块：
 
 ### 2.1 `legacy/simcore/simulation.py`
-推测职责：
-- 构建迷宫几何
-- 构建导航势场 `psi`
-- 构建 signed distance / wall normal 场
-- 定义单粒子动力学推进器
-- 执行单条轨迹模拟
-- 输出首达、困陷、耗散等统计量
+实际职责：
+- `MazeBuilder.build()` 构建 shell maze、`signed_distance`、壁面法向梯度、入口/出口 mask
+- `NavigationSolver.solve()` 在 free 域上解离散 Laplace 问题，生成导航势场 `psi` 与其梯度
+- `PointSimulator.run()` 执行单个 `SweepPoint` 的多轨迹模拟，保留旧动力学公式
+- `StatisticsEstimator` 计算 Wilson 区间和 bootstrap 置信区间
+- `DetectabilityAnalyzer.summarize()` 对 fig1/fig2 所需信号做额外汇总
+- `ArtifactWriter.write()` 将 summary / trajectory / trap episode / manifest / geometry / navigation 写盘
+- `SimulationTaskRunner.run()` 是 legacy 的主程序化入口，负责把一个 `SimulationTask` 跑完
 
 关键物理组成：
-- active self-propulsion
-- viscoelastic memory variable
-- delayed feedback alignment
-- uniform background flow
-- soft wall repulsion
-- first-passage detection
+- active self-propulsion: `f0 = gamma0 * v0`
+- viscoelastic memory variable: `q`
+- delayed feedback alignment: `tau_f` 与 `kf`
+- uniform background flow: `U`
+- soft wall repulsion: `signed_distance` + `grad_s`
+- first-passage detection: `exit_mask` / `r_exit`
 
 ### 2.2 `legacy/simcore/catalog.py`
-推测职责：
-- 定义实验设计
-- 定义参数扫描任务
-- 定义图任务或批处理任务
-- 组织不同 ablation（full / no_memory / no_feedback / no_flow）
+实际职责：
+- 定义 task-level 扫描入口 `TaskCatalog`
+- 组装 `GeometryConfig`、`DynamicsConfig`、`SweepPoint`
+- 注册两类任务：
+  - 内建 `simplified_detectability`
+  - 启动矩阵 `startup_matrix_block`
+- 用 `control_label`、`gamma1_over_gamma0`、`kf`、`U` 编码 ablation 和流场分支
 
 ### 2.3 几何与导航相关内部对象
-在旧代码中隐含存在：
+已确认可复用对象：
 - `MazeBuilder`
 - `NavigationSolver`
-- distance / normal field builder
-- 轨迹采样器 / PointSimulator
+- `MazeGeometry`
+- `NavigationField`
+- `PointSimulator.bilinear_sample()` 场插值
+- `PointSimulator.sample_inlet_positions()` 入口采样
+- `PointSimulator.build_discrete_linear_step()` 线性 OU/记忆子系统离散步进矩阵
 
-这些对象应尽量视为“可复用底层能力”，而不是立即改写。
+这些对象适合作为 `geometry_bridge.py` / `legacy_simcore_adapter.py` 的复用底层能力，第一阶段不应改写其物理实现。
 
 ---
 
@@ -125,13 +131,15 @@ project/
 
 | 旧模块 / 功能 | 物理角色 | 新模块位置 | 迁移方式 | 是否允许修改 |
 | --- | --- | --- | --- | --- |
-| `simulation.py` 主模拟入口 | 单轨迹求值核心 | `src/adapters/legacy_simcore_adapter.py` | 包裹调用 | 否，第一阶段不改 |
-| `catalog.py` 参数任务组织 | 扫描设计入口 | `src/adapters/catalog_bridge.py` | 读取/翻译 | 否，第一阶段不改 |
-| Maze geometry builder | 空间门控几何 | `src/adapters/geometry_bridge.py` | 复用/暴露接口 | 谨慎 |
-| Navigation solver | 导航势场 | `src/adapters/geometry_bridge.py` | 复用/暴露接口 | 谨慎 |
-| 单步推进 kernel | 动力学内核 | 暂留 legacy | 保持黑盒 | 否 |
-| legacy 输出 dict | 原始结果格式 | `src/configs/schema.py` | 标准化转换 | 不直接依赖原格式 |
-| 参数矩阵逻辑 | 旧实验定义 | `src/runners/*` | 逐步替代 | 是，新建替代层 |
+| `SimulationTaskRunner.run()` | task-level 单次运行入口 | `src/adapters/legacy_simcore_adapter.py` | 直接包裹 | 否 |
+| `PointSimulator.run()` | point-level 数值核心 | `src/adapters/legacy_simcore_adapter.py` | 作为黑盒单点评估器暴露 | 否 |
+| `TaskCatalog` | 参数任务组织 / 旧扫描设计 | `src/adapters/catalog_bridge.py` | 读取并翻译 `SimulationTask` / `SweepPoint` | 否 |
+| `MazeBuilder.build()` | 空间门控几何 | `src/adapters/geometry_bridge.py` | 复用接口 | 谨慎 |
+| `NavigationSolver.solve()` | 导航势场 | `src/adapters/geometry_bridge.py` | 复用接口 | 谨慎 |
+| `PointSimulator.build_discrete_linear_step()` | 记忆-速度线性步进子核 | 暂留 legacy | 黑盒复用 | 否 |
+| `summary` / `traj_df` / `trap_df` | 原始结果格式 | `src/configs/schema.py` | 标准化转换 | 不直接依赖原字段名 |
+| `ArtifactWriter` | 结果落盘与 manifest | `src/utils/io.py` 或 adapter 内部 | 路径与 schema 逐步替代 | 是 |
+| CSV startup matrix 逻辑 | 旧实验定义 | `src/runners/*` | 逐步外置到新 configs/manifests | 是 |
 
 ---
 
@@ -378,16 +386,17 @@ class SweepTask:
 
 | 新字段 | legacy 参数名 | 来源文件 | 默认值 | 备注 |
 | --- | --- | --- | --- | --- |
-| `v0` | TBD | `simulation.py` | TBD | 自推进速度 |
-| `Dr` | TBD | `simulation.py` | TBD | 旋转扩散 |
-| `tau_v` | TBD | `simulation.py` | TBD | 记忆松弛时间 |
-| `gamma0` | TBD | `simulation.py` | TBD | 瞬时摩擦 |
-| `gamma1` | TBD | `simulation.py` | TBD | 记忆强度 |
-| `tau_f` | TBD | `simulation.py` | TBD | 反馈延迟 |
-| `U` | TBD | `simulation.py` | TBD | 外部流速 |
-| `dt` | TBD | `simulation.py` | TBD | 时间步长 |
-| `Tmax` | TBD | `simulation.py` | TBD | 最大积分时间 |
-| `n_traj` | TBD | `catalog.py` / runner | TBD | 轨迹数 |
+| `v0` | `DynamicsConfig.v0` | `models.py` | `0.5` | 自推进速度 |
+| `Dr` | `DynamicsConfig.Dr` | `models.py` | `1.0` | 旋转扩散 |
+| `tau_v` | `SweepPoint.tau_v` | `models.py` / `catalog.py` | 无 dataclass 默认值 | 逐点扫描参数 |
+| `gamma0` | `DynamicsConfig.gamma0` | `models.py` | `1.0` | 瞬时摩擦 |
+| `gamma1` | `point.gamma1_over_gamma0 * dynamics.gamma0` | `simulation.py` | 派生量 | legacy 不直接存 `gamma1` |
+| `tau_f` | `SweepPoint.tau_f` | `models.py` / `catalog.py` | 无 dataclass 默认值 | 延迟反馈时间 |
+| `U` | `SweepPoint.U` | `models.py` / `catalog.py` | 无 dataclass 默认值 | 匀速背景流 |
+| `dt` | `DynamicsConfig.dt` | `models.py` | `0.0025` | 时间步长 |
+| `Tmax` | `DynamicsConfig.Tmax` | `models.py` | `40.0` | 内建 detectability 任务覆盖为 `20.0` |
+| `n_traj` | `DynamicsConfig.n_traj` | `models.py` / `catalog.py` | `1000` | 内建 detectability 任务覆盖为 `64` |
+| `seed` | `DynamicsConfig.seed` | `models.py` | `20260411` | 每个 point 再加 `1000 * point_index` |
 
 
 
@@ -447,8 +456,14 @@ outputs/runs/{phase}/{geometry_id}/{config_hash}/sample_trajectories.npz
 
 输出以下报告：
 
-*   legacy 单次运行入口在哪里
-*   legacy 参数表
-*   legacy 输出字典结构
-*   哪些地方最适合后续重构
-
+*   legacy 单次运行入口：
+    *   task-level: `SimulationTaskRunner.run()`
+    *   point-level: `PointSimulator.run()`
+    *   CLI wrapper: `cli.py -> run_task() -> SimulationTaskRunner.run()`
+*   legacy 参数表：见 `docs/legacy_parameter_map.md`
+*   legacy 输出字典结构：见 `docs/legacy_output_map.md`
+*   后续最适合重构的位置：
+    *   `TaskCatalog` -> 新 workflow manifest/config
+    *   `ArtifactWriter` -> 新 output schema / provenance 目录
+    *   `MazeBuilder` / `NavigationSolver` -> 提取为 geometry/navigation bridge
+    *   `PointSimulator` 外围包装层 -> 统一 `RunConfig` / `RunResult`

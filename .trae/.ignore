@@ -1,0 +1,9 @@
+outputs/
+results/
+figures/generated/
+__pycache__/
+.ipynb_checkpoints/
+*.npy
+*.npz
+*.pkl
+*.h5
