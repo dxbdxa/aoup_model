@@ -29,6 +29,9 @@ from src.utils.workflow_schema import (
 def load_reference_scales(reference_scales_path: str | Path | None) -> dict[str, Any] | None:
     if reference_scales_path is None:
         return None
+    reference_scales_path = Path(reference_scales_path)
+    if not reference_scales_path.exists():
+        return None
     with open(reference_scales_path, "r", encoding="ascii") as handle:
         return json.load(handle)
 
