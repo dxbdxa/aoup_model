@@ -14,6 +14,16 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.adapters.legacy_simcore_adapter import LegacySimcoreAdapter
 from src.configs.schema import RunConfig
+from src.utils.workflow_schema import (
+    build_phase_metadata,
+    build_state_point_record,
+    get_phase_paths,
+    get_run_dir,
+    write_json,
+    write_log,
+    write_result_bundle,
+    write_summary_tables,
+)
 
 
 def _variant_parameters(model_variant: str) -> tuple[float, float]:
@@ -69,6 +79,7 @@ def build_benchmark_mini_scan_configs(
                     n_shell=n_shell,
                     grid_n=grid_n,
                     kf=kf,
+                    flow_condition="zero_flow" if abs(U) <= 1e-15 else "with_flow",
                     metadata={
                         "L": 1.0,
                         "workflow_stage": "benchmark_mini_scan",
@@ -86,9 +97,12 @@ def run_benchmark_mini_scan(
     configs: tuple[RunConfig, ...] | None = None,
     output_root: str | Path | None = None,
     max_configs: int | None = None,
+    upstream_reference_scales_path: str | None = None,
 ) -> dict[str, Any]:
     project_root = Path(project_root)
-    output_root = Path(output_root) if output_root is not None else project_root / "outputs" / "summaries" / "benchmark_mini_scan"
+    output_root = Path(output_root) if output_root is not None else project_root / "outputs"
+    phase_paths = get_phase_paths(output_root, "benchmark_mini_scan")
+    scan_id = "benchmark_mini_scan"
     scan_configs = configs or build_benchmark_mini_scan_configs()
     if max_configs is not None:
         scan_configs = scan_configs[:max_configs]
@@ -96,30 +110,86 @@ def run_benchmark_mini_scan(
     adapter = LegacySimcoreAdapter(project_root)
     rows: list[dict[str, Any]] = []
     for config in scan_configs:
-        result = adapter.run_config(config)
-        row = result.to_dict()
-        row["seed"] = config.seed
-        row["tau_v"] = config.tau_v
-        row["tau_f"] = config.tau_f
-        row["U"] = config.U
-        row["Dr"] = config.Dr
-        row["v0"] = config.v0
+        task_id = f"{scan_id}_{config.model_variant}"
+        summary, traj_df, trap_df = adapter.run_point(config)
+        raw_summary_csv = get_run_dir(phase_paths, config) / "raw_summary.csv"
+        result = adapter.summary_to_result(
+            config,
+            summary,
+            traj_df=traj_df,
+            trap_df=trap_df,
+            artifact_paths={"summary_csv": str(raw_summary_csv)},
+        )
+        run_paths = write_result_bundle(
+            phase_paths,
+            config,
+            result,
+            raw_summary=summary,
+            scan_id=scan_id,
+            task_id=task_id,
+            shard_id=None,
+            upstream_reference_scales_path=upstream_reference_scales_path,
+            status_completion="completed",
+            status_stage=scan_id,
+            status_reason=None,
+        )
+        row = build_state_point_record(
+            scan_id,
+            config,
+            result,
+            task_id=task_id,
+            shard_id=None,
+            upstream_reference_scales_path=upstream_reference_scales_path,
+            status_completion="completed",
+            status_stage=scan_id,
+            traj_df=traj_df,
+            result_json_path=run_paths["result_json"],
+            raw_summary_kind="adapter_raw_summary_csv",
+            raw_summary_status="available",
+            phase_summary_path=str(phase_paths.summaries_root / "summary.csv"),
+            metadata_sidecar_path=str(phase_paths.summaries_root / "metadata.json"),
+            task_manifest_path=None,
+        )
+        row["result_json"] = run_paths["result_json"]
         rows.append(row)
 
     summary_df = pd.DataFrame(rows)
-    output_root.mkdir(parents=True, exist_ok=True)
-    summary_csv = output_root / "summary.csv"
-    summary_df.to_csv(summary_csv, index=False)
+    summary_paths = write_summary_tables(phase_paths, summary_df)
     metadata = {
         "scan_id": "benchmark_mini_scan",
         "n_configs": len(scan_configs),
-        "summary_csv": str(summary_csv),
+        "summary_csv": summary_paths["summary_csv"],
+        "summary_parquet": summary_paths["summary_parquet"],
         "model_variants": sorted({config.model_variant for config in scan_configs}),
+        "flow_conditions": sorted({config.flow_condition for config in scan_configs}),
         "geometry_ids": sorted({config.geometry_id for config in scan_configs}),
+        "upstream_reference_scales_path": upstream_reference_scales_path,
+        "status_completion": "completed",
+        "status_stage": scan_id,
+        "status_reason": None,
     }
-    with open(output_root / "metadata.json", "w", encoding="ascii") as handle:
-        json.dump(metadata, handle, indent=2)
-    metadata["metadata_json"] = str(output_root / "metadata.json")
+    metadata_json = phase_paths.summaries_root / "metadata.json"
+    metadata = build_phase_metadata(
+        scan_id=scan_id,
+        phase=scan_id,
+        task_id=scan_id,
+        summary_paths=summary_paths,
+        metadata_json_path=str(metadata_json),
+        upstream_reference_scales_path=upstream_reference_scales_path,
+        status_completion="completed",
+        scan_description="Benchmark mini-scan executed through the legacy adapter.",
+        n_state_points=len(scan_configs),
+    ) | metadata
+    write_json(metadata_json, metadata)
+    write_log(
+        phase_paths.logs_root / "benchmark_mini_scan.log",
+        [
+            "benchmark_mini_scan",
+            f"n_configs={len(scan_configs)}",
+            f"summary_csv={summary_paths['summary_csv']}",
+        ],
+    )
+    metadata["metadata_json"] = str(metadata_json)
     return {"summary_df": summary_df, "metadata": metadata}
 
 

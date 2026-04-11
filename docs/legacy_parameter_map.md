@@ -129,6 +129,7 @@ The legacy code does not use a dedicated `model_variant` enum. The branch identi
 
 - `TaskCatalog._register_builtin_tasks()` creates a small builtin task with `n_shell=1`, `grid_n=257`, `n_traj=64`, and `Tmax=20.0`.
 - `TaskCatalog._register_startup_matrix_tasks()` expects a CSV at `Experiment/designs/startup_parameter_sweep_matrix_2026-04-11.csv`.
+- In the current checkout, the `Experiment/` tree is absent, so startup-matrix tasks cannot be materialized without restoring that external design file.
 - `TaskOverride` can override `run_id`, `point_limit`, `n_traj`, `Tmax`, `n_shell`, `grid_n`, `seed`, and `bootstrap_resamples`.
 
 ## Migration Notes

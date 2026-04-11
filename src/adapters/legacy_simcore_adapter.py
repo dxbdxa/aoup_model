@@ -15,25 +15,24 @@ if str(PROJECT_ROOT) not in sys.path:
 from legacy.simcore.models import DynamicsConfig, GeometryConfig, RuntimePaths, SimulationTask, SweepPoint
 from legacy.simcore.simulation import MazeBuilder, NavigationSolver, PointSimulator, SimulationTaskRunner
 
-from src.configs.schema import RunConfig, RunResult
+from src.configs.schema import RunConfig, RunResult, infer_flow_condition
 
 
-def infer_model_variant(*, gamma1_over_gamma0: float, kf: float, U: float) -> str:
+def infer_model_variant(*, gamma1_over_gamma0: float, kf: float) -> str:
     if gamma1_over_gamma0 <= 0.0:
         return "no_memory"
     if kf <= 0.0:
         return "no_feedback"
-    if math.isclose(U, 0.0, abs_tol=1e-15):
-        return "no_flow"
     return "full"
 
 
-def infer_control_label(model_variant: str) -> str:
+def infer_control_label(model_variant: str, flow_condition: str) -> str:
+    if flow_condition == "explicit_no_flow_control":
+        return "no_flow"
     labels = {
         "full": "coupled_baseline",
         "no_memory": "no_memory",
         "no_feedback": "no_feedback",
-        "no_flow": "no_flow",
     }
     try:
         return labels[model_variant]
@@ -111,7 +110,7 @@ class LegacySimcoreAdapter:
         return SweepPoint(
             sweep_id=sweep_id or f"{config.geometry_id}_{config.model_variant}_{config.config_hash[:8]}",
             figure_group=figure_group,
-            control_label=control_label or infer_control_label(config.model_variant),
+            control_label=control_label or infer_control_label(config.model_variant, config.flow_condition),
             tau_v=config.tau_v,
             tau_f=config.tau_f,
             U=config.U,
@@ -186,6 +185,7 @@ class LegacySimcoreAdapter:
             config_hash=config.config_hash,
             geometry_id=config.geometry_id,
             model_variant=config.model_variant,
+            flow_condition=config.flow_condition,
             p_succ=float(summary.get("Psucc", 0.0)),
             mfpt_mean=_optional_float(summary.get("MFPT_success_only")),
             mfpt_median=float(finite_exit.median()) if not finite_exit.empty else None,
@@ -205,6 +205,7 @@ class LegacySimcoreAdapter:
                 "legacy_artifacts": dict(artifact_paths or {}),
                 "input_config": config.to_dict(),
             },
+            legacy_model_variant=config.legacy_model_variant,
         )
 
     def run_config(self, config: RunConfig) -> RunResult:
@@ -218,11 +219,16 @@ def legacy_task_point_to_run_config(task: SimulationTask, point: SweepPoint) -> 
     model_variant = infer_model_variant(
         gamma1_over_gamma0=gamma1_over_gamma0,
         kf=point.kf,
-        U=point.U,
     )
+    flow_condition = infer_flow_condition(
+        point.U,
+        legacy_model_variant=point.control_label if point.control_label == "no_flow" else None,
+    )
+    legacy_model_variant = "no_flow" if point.control_label == "no_flow" else None
     return RunConfig(
         geometry_id=f"shell_maze_ns{task.geometry.n_shell}_gn{task.geometry.grid_n}",
         model_variant=model_variant,
+        flow_condition=flow_condition,
         v0=task.dynamics.v0,
         Dr=task.dynamics.Dr,
         tau_v=point.tau_v,
@@ -254,6 +260,7 @@ def legacy_task_point_to_run_config(task: SimulationTask, point: SweepPoint) -> 
             "mode": task.mode,
             "notes": task.notes,
         },
+        legacy_model_variant=legacy_model_variant,
     )
 
 

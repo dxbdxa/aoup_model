@@ -14,6 +14,16 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.adapters.legacy_simcore_adapter import LegacySimcoreAdapter
 from src.configs.schema import RunConfig
+from src.utils.workflow_schema import (
+    build_phase_metadata,
+    build_state_point_record,
+    get_phase_paths,
+    get_run_dir,
+    write_json,
+    write_log,
+    write_result_bundle,
+    write_summary_tables,
+)
 
 
 def build_reference_run_config(
@@ -56,6 +66,7 @@ def build_reference_run_config(
         grid_n=grid_n,
         kf=0.0,
         bootstrap_resamples=256,
+        flow_condition="zero_flow",
         metadata=merged_metadata,
     )
 
@@ -79,12 +90,35 @@ def extract_reference_scales(
     output_root: str | Path | None = None,
 ) -> dict[str, Any]:
     project_root = Path(project_root)
-    output_root = Path(output_root) if output_root is not None else project_root / "outputs" / "reference"
+    output_root = Path(output_root) if output_root is not None else project_root / "outputs"
+    phase_paths = get_phase_paths(output_root, "reference_scales")
 
     adapter = LegacySimcoreAdapter(project_root)
     run_config = config or build_reference_run_config()
+    scan_id = "reference_scales"
+    task_id = "reference_scale_extraction"
     summary, traj_df, trap_df = adapter.run_point(run_config)
-    result = adapter.summary_to_result(run_config, summary, traj_df=traj_df, trap_df=trap_df)
+    raw_summary_csv = get_run_dir(phase_paths, run_config) / "raw_summary.csv"
+    result = adapter.summary_to_result(
+        run_config,
+        summary,
+        traj_df=traj_df,
+        trap_df=trap_df,
+        artifact_paths={"summary_csv": str(raw_summary_csv)},
+    )
+    run_paths = write_result_bundle(
+        phase_paths,
+        run_config,
+        result,
+        raw_summary=summary,
+        scan_id=scan_id,
+        task_id=task_id,
+        shard_id=None,
+        upstream_reference_scales_path=None,
+        status_completion="completed",
+        status_stage=scan_id,
+        status_reason=None,
+    )
 
     tau_g = result.mfpt_mean if result.mfpt_mean is not None else run_config.Tmax
     ell_g = run_config.v0 * tau_g
@@ -94,18 +128,66 @@ def extract_reference_scales(
     transition_df["fpt"] = transition_df["t_exit_or_nan"]
     transition_df["wall_fraction"] = transition_df["boundary_contact_fraction_i"]
     transition_df["drag_dissipation"] = transition_df["Sigma_drag_i"]
-    transition_df["scan_id"] = "reference_scale_baseline"
+    transition_df["scan_id"] = scan_id
+    transition_df["task_id"] = task_id
+    transition_df["shard_id"] = None
+    transition_df["state_point_id"] = run_config.config_hash
+    transition_df["config_hash"] = run_config.config_hash
+    transition_df["seed"] = run_config.seed
     transition_df["geometry_id"] = run_config.geometry_id
     transition_df["model_variant"] = run_config.model_variant
+    transition_df["termination_reason"] = transition_df["success"].map(lambda success: "exit" if success else "tmax")
+    trap_counts = trap_df.groupby("traj_id").size() if not trap_df.empty else pd.Series(dtype=int)
+    transition_df["trap_count"] = transition_df["traj_id"].map(trap_counts).fillna(0).astype(int)
+    trap_totals = trap_df.groupby("traj_id")["trap_duration"].sum() if not trap_df.empty else pd.Series(dtype=float)
+    transition_df["trap_time_total"] = transition_df["traj_id"].map(trap_totals).fillna(0.0)
+    transition_df["path_length"] = None
+    transition_df["revisit_count"] = None
+    transition_df["mean_progress_along_nav"] = None
+    transition_df["mean_speed"] = None
+    transition_df["mean_rel_speed_to_flow"] = None
+    transition_df["alignment_cos_mean"] = None
+    transition_df["alignment_cos_std"] = None
+    transition_df["gate_cross_count"] = None
+    transition_df["last_gate_index"] = None
+    transition_df["upstream_reference_scales_path"] = None
+    transition_df["status_completion"] = "completed"
+    transition_df["status_stage"] = scan_id
+    transition_df["status_reason"] = None
 
-    output_root.mkdir(parents=True, exist_ok=True)
     table_paths = _write_table_with_optional_parquet(
         transition_df,
-        output_root / "baseline_transition_stats.csv",
-        output_root / "baseline_transition_stats.parquet",
+        phase_paths.summaries_root / "baseline_transition_stats.csv",
+        phase_paths.summaries_root / "baseline_transition_stats.parquet",
     )
+    summary_df = pd.DataFrame(
+        [
+            build_state_point_record(
+                scan_id,
+                run_config,
+                result,
+                task_id=task_id,
+                shard_id=None,
+                upstream_reference_scales_path=None,
+                status_completion="completed",
+                status_stage=scan_id,
+                traj_df=traj_df,
+                result_json_path=run_paths["result_json"],
+                raw_summary_kind="adapter_raw_summary_csv",
+                raw_summary_status="available",
+                phase_summary_path=str(phase_paths.summaries_root / "summary.csv"),
+                metadata_sidecar_path=str(phase_paths.summaries_root / "metadata.json"),
+                task_manifest_path=None,
+            )
+        ]
+    )
+    summary_paths = write_summary_tables(phase_paths, summary_df)
+    reference_scales_json = phase_paths.summaries_root / "reference_scales.json"
+    metadata_json = phase_paths.summaries_root / "metadata.json"
     scales = {
         "scan_id": "reference_scale_baseline",
+        "task_id": task_id,
+        "state_point_id": run_config.config_hash,
         "geometry_id": run_config.geometry_id,
         "model_variant": run_config.model_variant,
         "ell_g": ell_g,
@@ -118,11 +200,53 @@ def extract_reference_scales(
         "p_succ": result.p_succ,
         "config_hash": run_config.config_hash,
         "reference_config": run_config.to_dict(),
+        "result_json": run_paths["result_json"],
+        "raw_summary_path": run_paths["raw_summary_csv"],
+        "metadata_json": str(metadata_json),
         "transition_stats": table_paths,
+        "summary_tables": summary_paths,
+        "status_completion": "completed",
+        "status_stage": scan_id,
+        "status_reason": None,
+        "upstream_reference_scales_path": None,
     }
-    with open(output_root / "reference_scales.json", "w", encoding="ascii") as handle:
-        json.dump(scales, handle, indent=2)
-    scales["reference_scales_json"] = str(output_root / "reference_scales.json")
+    legacy_reference_dir = output_root / "reference"
+    legacy_reference_dir.mkdir(parents=True, exist_ok=True)
+    _write_table_with_optional_parquet(
+        transition_df,
+        legacy_reference_dir / "baseline_transition_stats.csv",
+        legacy_reference_dir / "baseline_transition_stats.parquet",
+    )
+    write_log(
+        phase_paths.logs_root / "reference_scale_extraction.log",
+        [
+            "reference_scale_extraction",
+            f"geometry_id={run_config.geometry_id}",
+            f"config_hash={run_config.config_hash}",
+            f"result_json={run_paths['result_json']}",
+        ],
+    )
+    scales["compatibility_shims"] = {
+        "legacy_reference_scales_json": str(legacy_reference_dir / "reference_scales.json"),
+        "legacy_transition_stats_csv": str(legacy_reference_dir / "baseline_transition_stats.csv"),
+        "legacy_transition_stats_parquet": str(legacy_reference_dir / "baseline_transition_stats.parquet"),
+    }
+    scales["reference_scales_json"] = str(reference_scales_json)
+    metadata = build_phase_metadata(
+        scan_id=scan_id,
+        phase=scan_id,
+        task_id=task_id,
+        summary_paths=summary_paths,
+        metadata_json_path=str(metadata_json),
+        upstream_reference_scales_path=None,
+        status_completion="completed",
+        scan_description="Baseline reference-scale extraction through the legacy adapter.",
+        n_state_points=1,
+        compatibility_shims=scales["compatibility_shims"],
+    )
+    write_json(metadata_json, metadata)
+    write_json(reference_scales_json, scales)
+    write_json(legacy_reference_dir / "reference_scales.json", scales)
     return scales
 
 

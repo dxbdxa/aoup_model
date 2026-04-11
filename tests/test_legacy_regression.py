@@ -38,13 +38,15 @@ def _small_baseline_cases() -> list[RunConfig]:
     return [
         RunConfig(
             **common,
-            model_variant="no_flow",
+            model_variant="full",
             tau_v=0.25,
             gamma1=4.0,
             tau_f=0.125,
             U=0.0,
             kf=3.0,
             seed=1101,
+            flow_condition="explicit_no_flow_control",
+            legacy_model_variant="no_flow",
         ),
         RunConfig(
             **common,
@@ -89,14 +91,15 @@ def _small_baseline_cases() -> list[RunConfig]:
     ]
 
 
-def _direct_control_label(model_variant: str) -> str:
+def _direct_control_label(config: RunConfig) -> str:
+    if config.flow_condition == "explicit_no_flow_control":
+        return "no_flow"
     labels = {
         "full": "coupled_baseline",
         "no_memory": "no_memory",
         "no_feedback": "no_feedback",
-        "no_flow": "no_flow",
     }
-    return labels[model_variant]
+    return labels[config.model_variant]
 
 
 def _direct_legacy_run(config: RunConfig) -> tuple[dict[str, object], pd.DataFrame, pd.DataFrame]:
@@ -125,7 +128,7 @@ def _direct_legacy_run(config: RunConfig) -> tuple[dict[str, object], pd.DataFra
     point = SweepPoint(
         sweep_id=f"{config.geometry_id}_{config.model_variant}_{config.config_hash[:8]}",
         figure_group="adapter_stub",
-        control_label=_direct_control_label(config.model_variant),
+        control_label=_direct_control_label(config),
         tau_v=config.tau_v,
         tau_f=config.tau_f,
         U=config.U,

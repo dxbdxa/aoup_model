@@ -13,7 +13,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from legacy.simcore.models import DynamicsConfig, GeometryConfig, SimulationTask, SweepPoint
 from src.adapters.catalog_bridge import CatalogBridge
 from src.adapters.legacy_simcore_adapter import LegacySimcoreAdapter, legacy_task_point_to_run_config
-from src.configs.schema import RunConfig
+from src.configs.schema import RunConfig, RunResult
+from src.utils.workflow_schema import normalize_persisted_artifact_payload
 
 
 def make_run_config() -> RunConfig:
@@ -39,11 +40,14 @@ def make_run_config() -> RunConfig:
 
 def test_run_config_round_trip_and_hash_is_stable() -> None:
     config = make_run_config()
-    rebuilt = RunConfig.from_dict(config.to_dict())
+    payload = config.to_dict()
+    rebuilt = RunConfig.from_dict(payload)
 
     assert rebuilt == config
     assert rebuilt.config_hash == config.config_hash
     assert len(config.config_hash) == 64
+    assert payload["config_hash"] == config.config_hash
+    assert payload["flow_condition"] == "with_flow"
 
 
 def test_adapter_builds_legacy_components_without_changing_physics_files() -> None:
@@ -164,3 +168,68 @@ def test_catalog_bridge_translates_manual_legacy_task_to_sweep_task() -> None:
     assert len(sweep_task.config_list) == 1
     assert payload["config_list"][0]["model_variant"] == "full"
     assert json.loads(json.dumps(payload))["metadata"]["legacy_run_id"] == "stub_run"
+
+
+def test_model_variant_compatibility_reads_old_and_new_payloads() -> None:
+    old_payload = {
+        "geometry_id": "maze_v1",
+        "model_variant": "no_flow",
+        "v0": 0.5,
+        "Dr": 1.0,
+        "tau_v": 0.5,
+        "gamma0": 1.0,
+        "gamma1": 4.0,
+        "tau_f": 0.25,
+        "U": 0.0,
+        "wall_thickness": 0.04,
+        "gate_width": 0.08,
+        "dt": 0.0025,
+        "Tmax": 20.0,
+        "n_traj": 16,
+        "seed": 123,
+        "metadata": {"L": 1.0},
+    }
+    new_payload = {
+        **old_payload,
+        "model_variant": "full",
+        "flow_condition": "explicit_no_flow_control",
+        "legacy_model_variant": "no_flow",
+    }
+
+    old_config = RunConfig.from_dict(old_payload)
+    new_config = RunConfig.from_dict(new_payload)
+    normalized_row = normalize_persisted_artifact_payload({"model_variant": "no_flow", "U": 0.0})
+    old_result = RunResult.from_dict(
+        {
+            "run_id": "r1",
+            "config_hash": "abc",
+            "geometry_id": "maze_v1",
+            "model_variant": "no_flow",
+            "p_succ": 0.1,
+            "mfpt_mean": None,
+            "mfpt_median": None,
+            "mfpt_q90": None,
+            "sigma_drag_mean": None,
+            "eta_sigma": None,
+            "trap_time_mean": None,
+            "trap_count_mean": None,
+            "wall_fraction_mean": None,
+            "revisit_rate_mean": None,
+            "n_traj": 4,
+            "n_success": 0,
+            "ci": {},
+            "raw_summary_path": None,
+            "metadata": {},
+            "U": 0.0,
+        }
+    )
+
+    assert old_config.model_variant == "full"
+    assert old_config.flow_condition == "explicit_no_flow_control"
+    assert old_config.legacy_model_variant == "no_flow"
+    assert new_config.model_variant == "full"
+    assert new_config.flow_condition == "explicit_no_flow_control"
+    assert normalized_row["model_variant"] == "full"
+    assert normalized_row["flow_condition"] == "explicit_no_flow_control"
+    assert old_result.model_variant == "full"
+    assert old_result.flow_condition == "explicit_no_flow_control"

@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 
 from src.configs.schema import RunConfig, SweepTask
+from src.utils.workflow_schema import build_phase_metadata, get_phase_paths, write_json, write_log, write_summary_tables
 
 
 def _variant_parameters(model_variant: str, base_gamma0: float) -> tuple[float, float]:
@@ -62,12 +63,20 @@ def build_coarse_scan_configs(
         for point_index in range(num_points):
             gamma1, kf = _variant_parameters(model_variant, base_gamma0=1.0)
             U = float(U_values[point_index])
+            flow_condition = "with_flow"
+            normalized_variant = model_variant
+            legacy_model_variant = None
             if model_variant == "no_flow":
                 U = 0.0
+                flow_condition = "explicit_no_flow_control"
+                normalized_variant = "full"
+                legacy_model_variant = "no_flow"
+            elif abs(U) <= 1e-15:
+                flow_condition = "zero_flow"
             configs.append(
                 RunConfig(
                     geometry_id=geometry_id,
-                    model_variant=model_variant,
+                    model_variant=normalized_variant,
                     v0=0.5,
                     Dr=float(Dr_values[point_index]),
                     tau_v=float(tau_v_values[point_index]),
@@ -85,11 +94,13 @@ def build_coarse_scan_configs(
                     n_shell=n_shell,
                     grid_n=grid_n,
                     kf=kf,
+                    flow_condition=flow_condition,
                     metadata={
                         "L": 1.0,
                         "workflow_stage": "coarse_scan_generation",
                         "state_point_index": point_index,
                     },
+                    legacy_model_variant=legacy_model_variant,
                 )
             )
             config_index += 1
@@ -132,16 +143,152 @@ def write_coarse_scan_manifest(
     *,
     tasks: tuple[SweepTask, ...] | None = None,
     output_root: str | Path | None = None,
+    upstream_reference_scales_path: str | None = None,
 ) -> dict[str, Any]:
     project_root = Path(project_root)
-    output_root = Path(output_root) if output_root is not None else project_root / "outputs" / "runs" / "coarse_scan"
+    output_root = Path(output_root) if output_root is not None else project_root / "outputs"
+    phase_paths = get_phase_paths(output_root, "coarse_scan")
+    scan_id = "coarse_scan"
     task_list = tasks or generate_coarse_scan_tasks()
-    output_root.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_root / "task_manifest.json"
-    payload = {"phase": "coarse_scan", "n_tasks": len(task_list), "tasks": [task.to_dict() for task in task_list]}
-    with open(manifest_path, "w", encoding="ascii") as handle:
-        json.dump(payload, handle, indent=2)
-    return {"manifest_path": str(manifest_path), "n_tasks": len(task_list), "tasks": task_list}
+    manifest_path = phase_paths.runs_root / "task_manifest.json"
+    payload = {
+        "phase": scan_id,
+        "scan_id": scan_id,
+        "task_id": "generate_coarse_scan_tasks",
+        "shard_id": None,
+        "status_completion": "generated_manifest_only",
+        "status_stage": scan_id,
+        "status_reason": "coarse_scan_generation_only",
+        "upstream_reference_scales_path": upstream_reference_scales_path,
+        "n_tasks": len(task_list),
+        "tasks": [task.to_dict() for task in task_list],
+    }
+    write_json(manifest_path, payload)
+
+    rows: list[dict[str, Any]] = []
+    for task in task_list:
+        for config in task.config_list:
+            tau_p = (1.0 / config.Dr) if config.Dr != 0.0 else None
+            gamma1_over_gamma0 = config.gamma1_over_gamma0
+            if gamma1_over_gamma0 is None:
+                gamma1_over_gamma0 = (config.gamma1 / config.gamma0) if config.gamma0 != 0.0 else None
+            rows.append(
+                {
+                    "scan_id": scan_id,
+                    "task_id": task.task_id,
+                    "shard_id": f"batch_{task.batch_index:03d}",
+                    "phase": task.phase,
+                    "batch_index": task.batch_index,
+                    "state_point_id": config.config_hash,
+                    "config_hash": config.config_hash,
+                    "geometry_id": config.geometry_id,
+                    "model_variant": config.model_variant,
+                    "flow_condition": config.flow_condition,
+                    "legacy_model_variant": config.legacy_model_variant,
+                    "seed": config.seed,
+                    "v0": config.v0,
+                    "Dr": config.Dr,
+                    "tau_v": config.tau_v,
+                    "gamma0": config.gamma0,
+                    "gamma1": config.gamma1,
+                    "tau_f": config.tau_f,
+                    "U": config.U,
+                    "wall_thickness": config.wall_thickness,
+                    "gate_width": config.gate_width,
+                    "dt": config.dt,
+                    "Tmax": config.Tmax,
+                    "exit_radius": config.exit_radius,
+                    "n_shell": config.n_shell,
+                    "grid_n": config.grid_n,
+                    "kf": config.kf,
+                    "kBT": config.kBT,
+                    "eps_psi": config.eps_psi,
+                    "gamma1_over_gamma0": gamma1_over_gamma0,
+                    "tau_p": tau_p,
+                    "tau_v_over_tau_p": (config.tau_v / tau_p) if tau_p else None,
+                    "tau_f_over_tau_p": (config.tau_f / tau_p) if tau_p else None,
+                    "U_over_v0": (config.U / config.v0) if config.v0 != 0.0 else None,
+                    "n_traj": config.n_traj,
+                    "n_success": None,
+                    "Psucc_mean": None,
+                    "Psucc_ci_low": None,
+                    "Psucc_ci_high": None,
+                    "MFPT_mean": None,
+                    "MFPT_median": None,
+                    "FPT_q10": None,
+                    "FPT_q90": None,
+                    "trap_time_mean": None,
+                    "trap_count_mean": None,
+                    "wall_fraction_mean": None,
+                    "Sigma_drag_mean": None,
+                    "J_proxy": None,
+                    "eta_sigma_mean": None,
+                    "eta_sigma_ci_low": None,
+                    "eta_sigma_ci_high": None,
+                    "revisit_mean": None,
+                    "alignment_mean": None,
+                    "alignment_lag_peak": None,
+                    "status_converged": None,
+                    "status_rare_event_used": False,
+                    "status_completion": "generated_manifest_only",
+                    "status_stage": scan_id,
+                    "status_reason": "coarse_scan_generation_only",
+                    "runtime_seconds": None,
+                    "code_version": None,
+                    "result_json": None,
+                    "normalized_result_path": None,
+                    "normalized_result_kind": "not_applicable_generation_only",
+                    "raw_summary_path": None,
+                    "raw_summary_kind": "not_applicable_generation_only",
+                    "raw_summary_status": "not_applicable",
+                    "phase_summary_path": str(phase_paths.summaries_root / "summary.csv"),
+                    "phase_summary_kind": "phase_summary_table",
+                    "metadata_sidecar_path": str(phase_paths.summaries_root / "metadata.json"),
+                    "metadata_sidecar_kind": "metadata_json_sidecar",
+                    "task_manifest_path": str(manifest_path),
+                    "task_manifest_kind": "task_manifest_json",
+                    "upstream_reference_scales_path": upstream_reference_scales_path,
+                    "metadata_json": json.dumps(config.metadata, sort_keys=True),
+                }
+            )
+    if rows:
+        import pandas as pd
+
+        summary_paths = write_summary_tables(phase_paths, pd.DataFrame(rows))
+    else:
+        summary_paths = {"summary_csv": "", "summary_parquet": ""}
+    metadata_json = phase_paths.summaries_root / "metadata.json"
+    metadata = build_phase_metadata(
+        scan_id=scan_id,
+        phase=scan_id,
+        task_id="generate_coarse_scan_tasks",
+        summary_paths=summary_paths,
+        metadata_json_path=str(metadata_json),
+        upstream_reference_scales_path=upstream_reference_scales_path,
+        status_completion="generated_manifest_only",
+        scan_description="Coarse-scan task generation only; no execution is performed at this stage.",
+        manifest_path=str(manifest_path),
+        n_state_points=len(rows),
+        n_tasks=len(task_list),
+    )
+    metadata["status_reason"] = "coarse_scan_generation_only"
+    write_json(metadata_json, metadata)
+    write_log(
+        phase_paths.logs_root / "generate_coarse_scan_tasks.log",
+        [
+            "generate_coarse_scan_tasks",
+            f"n_tasks={len(task_list)}",
+            f"manifest_path={manifest_path}",
+        ],
+    )
+    return {
+        "manifest_path": str(manifest_path),
+        "n_tasks": len(task_list),
+        "tasks": task_list,
+        "summary_csv": summary_paths["summary_csv"],
+        "summary_parquet": summary_paths["summary_parquet"],
+        "metadata_json": str(metadata_json),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
