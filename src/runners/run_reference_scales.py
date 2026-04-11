@@ -190,6 +190,8 @@ def extract_reference_scales(
         "state_point_id": run_config.config_hash,
         "geometry_id": run_config.geometry_id,
         "model_variant": run_config.model_variant,
+        "flow_condition": run_config.flow_condition,
+        "legacy_model_variant": run_config.legacy_model_variant,
         "ell_g": ell_g,
         "tau_g": tau_g,
         "tau_p": tau_p,
@@ -244,6 +246,8 @@ def extract_reference_scales(
         n_state_points=1,
         compatibility_shims=scales["compatibility_shims"],
     )
+    metadata["model_variants"] = [run_config.model_variant]
+    metadata["flow_conditions"] = [run_config.flow_condition]
     write_json(metadata_json, metadata)
     write_json(reference_scales_json, scales)
     write_json(legacy_reference_dir / "reference_scales.json", scales)

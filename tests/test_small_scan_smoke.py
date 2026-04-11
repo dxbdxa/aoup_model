@@ -44,6 +44,7 @@ def test_benchmark_mini_scan_smoke(tmp_path: Path) -> None:
     assert "config_hash" in result["summary_df"].columns
     assert "state_point_id" in result["summary_df"].columns
     assert "task_id" in result["summary_df"].columns
+    assert "flow_condition" in result["summary_df"].columns
     assert "upstream_reference_scales_path" in result["summary_df"].columns
     assert "raw_summary_kind" in result["summary_df"].columns
     assert result["summary_df"].iloc[0]["upstream_reference_scales_path"] == upstream

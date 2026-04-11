@@ -272,6 +272,8 @@ def write_coarse_scan_manifest(
         n_tasks=len(task_list),
     )
     metadata["status_reason"] = "coarse_scan_generation_only"
+    metadata["model_variants"] = sorted({config.model_variant for task in task_list for config in task.config_list})
+    metadata["flow_conditions"] = sorted({config.flow_condition for task in task_list for config in task.config_list})
     write_json(metadata_json, metadata)
     write_log(
         phase_paths.logs_root / "generate_coarse_scan_tasks.log",

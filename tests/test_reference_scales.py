@@ -49,6 +49,8 @@ def test_extract_reference_scales_writes_expected_outputs(tmp_path: Path) -> Non
     assert summary_df.loc[0, "scan_id"] == "reference_scales"
     assert summary_df.loc[0, "task_id"] == "reference_scale_extraction"
     assert summary_df.loc[0, "state_point_id"] == config.config_hash
+    assert summary_df.loc[0, "model_variant"] == "no_memory"
+    assert summary_df.loc[0, "flow_condition"] == "zero_flow"
     assert summary_df.loc[0, "raw_summary_kind"] == "adapter_raw_summary_csv"
     assert summary_df.loc[0, "raw_summary_status"] == "available"
     assert summary_df.loc[0, "phase_summary_kind"] == "phase_summary_table"
