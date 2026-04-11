@@ -26,6 +26,41 @@ from src.utils.workflow_schema import (
 )
 
 
+def load_reference_scales(reference_scales_path: str | Path | None) -> dict[str, Any] | None:
+    if reference_scales_path is None:
+        return None
+    with open(reference_scales_path, "r", encoding="ascii") as handle:
+        return json.load(handle)
+
+
+def augment_row_with_reference_scales(row: dict[str, Any], reference_scales: dict[str, Any] | None) -> dict[str, Any]:
+    if reference_scales is None:
+        row["reference_tau_g"] = None
+        row["reference_l_g"] = None
+        row["reference_tau_p"] = None
+        row["tau_v_over_tau_g"] = None
+        row["tau_f_over_tau_g"] = None
+        row["U_tau_g_over_l_g"] = None
+        row["Pi_m"] = None
+        row["Pi_f"] = None
+        row["Pi_U"] = None
+        return row
+
+    tau_g = reference_scales.get("tau_g")
+    l_g = reference_scales.get("ell_g")
+    tau_p = reference_scales.get("tau_p")
+    row["reference_tau_g"] = tau_g
+    row["reference_l_g"] = l_g
+    row["reference_tau_p"] = tau_p
+    row["tau_v_over_tau_g"] = (row["tau_v"] / tau_g) if tau_g else None
+    row["tau_f_over_tau_g"] = (row["tau_f"] / tau_g) if tau_g else None
+    row["U_tau_g_over_l_g"] = (row["U"] * tau_g / l_g) if l_g else None
+    row["Pi_m"] = row["tau_v_over_tau_g"]
+    row["Pi_f"] = row["tau_f_over_tau_g"]
+    row["Pi_U"] = row["U_tau_g_over_l_g"]
+    return row
+
+
 def _variant_parameters(model_variant: str) -> tuple[float, float]:
     if model_variant == "full":
         return 4.0, 3.0
@@ -106,6 +141,7 @@ def run_benchmark_mini_scan(
     scan_configs = configs or build_benchmark_mini_scan_configs()
     if max_configs is not None:
         scan_configs = scan_configs[:max_configs]
+    reference_scales = load_reference_scales(upstream_reference_scales_path)
 
     adapter = LegacySimcoreAdapter(project_root)
     rows: list[dict[str, Any]] = []
@@ -150,6 +186,9 @@ def run_benchmark_mini_scan(
             metadata_sidecar_path=str(phase_paths.summaries_root / "metadata.json"),
             task_manifest_path=None,
         )
+        row = augment_row_with_reference_scales(row, reference_scales)
+        for key in ("scan_block", "scan_label", "sensitivity_axis", "sensitivity_level"):
+            row[key] = config.metadata.get(key)
         row["result_json"] = run_paths["result_json"]
         rows.append(row)
 
@@ -164,6 +203,9 @@ def run_benchmark_mini_scan(
         "flow_conditions": sorted({config.flow_condition for config in scan_configs}),
         "geometry_ids": sorted({config.geometry_id for config in scan_configs}),
         "upstream_reference_scales_path": upstream_reference_scales_path,
+        "reference_tau_g": reference_scales.get("tau_g") if reference_scales else None,
+        "reference_l_g": reference_scales.get("ell_g") if reference_scales else None,
+        "reference_tau_p": reference_scales.get("tau_p") if reference_scales else None,
         "status_completion": "completed",
         "status_stage": scan_id,
         "status_reason": None,
