@@ -4,6 +4,7 @@ import pandas as pd
 
 from src.configs.schema import RunConfig
 from src.runners.run_mechanism_dataset import add_event_alignment_columns, build_gate_descriptors, build_thresholds
+from src.runners.run_mechanism_dataset_refined import build_refined_thresholds
 
 
 def build_config() -> RunConfig:
@@ -75,3 +76,14 @@ def test_add_event_alignment_columns_backshifts_trap_rows_only() -> None:
     assert aligned.loc[1, "trap_confirmation_backshift"] == 0.4975
     assert aligned.loc[1, "t_start_aligned"] == 1.5025
     assert aligned.loc[1, "duration_aligned"] == 0.5125
+
+
+def test_build_refined_thresholds_narrows_commit_band() -> None:
+    config = build_config()
+
+    thresholds = build_refined_thresholds(config, {"tau_p": 1.0, "tau_g": 7.0, "ell_g": 3.5})
+
+    assert thresholds.gate_commit_lane_half_width < thresholds.gate_lane_half_width
+    assert thresholds.gate_residence_depth < thresholds.gate_approach_depth
+    assert thresholds.gate_commit_progress_min > thresholds.gate_progress_min
+    assert thresholds.gate_commit_alignment_min > 0.3
